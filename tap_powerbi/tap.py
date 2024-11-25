@@ -29,10 +29,11 @@ class TapPowerBI(Tap):
     name = "tap-powerbi"
 
     config_jsonschema = th.PropertiesList(
-        th.Property("client_id", th.StringType, required=True),
-        th.Property("client_secret", th.StringType, required=True),
-        th.Property("redirect_uri", th.StringType, required=True),
-        th.Property("refresh_token", th.StringType, required=True),
+        #th.Property("client_id", th.StringType, required=True),
+        #th.Property("client_secret", th.StringType, required=True),
+        #th.Property("redirect_uri", th.StringType, required=True),
+        #th.Property("refresh_token", th.StringType, required=True),
+        th.Property("token", th.StringType, required=True),
         th.Property("tables", th.CustomType({"type": ["array", "string"]})),
     ).to_dict()
 

@@ -1,14 +1,11 @@
 """REST client handling, including PowerBIStream base class."""
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Optional
 
 import requests
-from memoization import cached
 from singer_sdk.helpers.jsonpath import extract_jsonpath
 from singer_sdk.streams import RESTStream
-
-from tap_powerbi.auth import PowerBIAuthenticator
 from singer_sdk.exceptions import FatalAPIError, RetriableAPIError
 
 
@@ -17,23 +14,17 @@ class PowerBIStream(RESTStream):
 
     url_base = "https://api.powerbi.com/v1.0/myorg"
 
-    records_jsonpath = "$.value[*]"  
-    next_page_token_jsonpath = "$.next_page"  
+    records_jsonpath = "$.value[*]" 
+    next_page_token_jsonpath = "$.next_page"
     _page_size = 1000
     offset = 0
 
     @property
-    @cached
-    def authenticator(self) -> PowerBIAuthenticator:
-        """Return a new authenticator object."""
-        return PowerBIAuthenticator.create_for_stream(self)
-
-    @property
     def http_headers(self) -> dict:
-        """Return the http headers needed."""
-        headers = {}
-        if "user_agent" in self.config:
-            headers["User-Agent"] = self.config.get("user_agent")
+        """Return the HTTP headers needed for the request."""
+        headers = super().http_headers or {}
+        if "token" in self.config:
+            headers["Authorization"] = f"Bearer {self.config['token']}"
         return headers
 
     def get_next_page_token(
@@ -42,7 +33,7 @@ class PowerBIStream(RESTStream):
         """Return a token for identifying next page or None if no more pages."""
         next_page_token = None
         if self.name == "dataset_data":
-            self.offset = self.offset + self._page_size
+            self.offset += self._page_size
             all_matches = extract_jsonpath(self.records_jsonpath, response.json())
             first_match = next(iter(all_matches), None)
             if first_match is None:
@@ -62,8 +53,9 @@ class PowerBIStream(RESTStream):
         """Return a dictionary of values to be used in URL parameterization."""
         params: dict = {}
         return params
-    
+
     def validate_response(self, response: requests.Response) -> None:
+        """Validate HTTP response."""
         if (
             response.status_code in self.extra_retry_statuses
             or 500 <= response.status_code < 600
@@ -74,6 +66,9 @@ class PowerBIStream(RESTStream):
             msg = self.response_error_message(response)
             data = response.json()
             if self.name == "dataset_data" and "error" in data:
-                self.logger.warn(f"Error fetching data for {response.request.url}, body {response.request.body}, respone: {response.text}")
-            else:    
+                self.logger.warning(
+                    f"Error fetching data for {response.request.url}, "
+                    f"body {response.request.body}, response: {response.text}"
+                )
+            else:
                 raise FatalAPIError(msg)
