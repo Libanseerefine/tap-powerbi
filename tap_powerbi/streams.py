@@ -1,18 +1,13 @@
-"""Stream type classes for tap-powerbi."""
-
-
 from typing import Any, Optional, Iterable
-
 from singer_sdk import typing as th
-
 from tap_powerbi.client import PowerBIStream
 import requests
 
 class ReportsStream(PowerBIStream):
-    """Define custom stream."""
+    """Stream for fetching reports."""
 
     name = "reports"
-    path = "/reports"
+    path = "/groups/{workspace_id}/reports" 
     primary_keys = ["id"]
     replication_key = None
 
@@ -24,158 +19,128 @@ class ReportsStream(PowerBIStream):
         th.Property("embedUrl", th.StringType),
     ).to_dict()
 
-    def get_child_context(self, record: dict, context: Optional[dict]) -> dict:
-        """Return a context dictionary for child streams."""
+    def get_records(self, context: Optional[dict]) -> Iterable[dict]:
+        """Fetch and filter the target report."""
+        for record in super().get_records(context):
+            if record["name"] == self.config["report"]:  # Match the target report
+                yield record
+
+class ReportDataSetDataStream(PowerBIStream):
+    """Stream for fetching data from datasets associated with reports."""
+
+    name = "report_dataset_data"
+    path = "/groups/{workspace_id}/datasets/{dataset_id}/executeQueries"  # Include workspace and dataset
+    rest_method = "POST"
+    primary_keys = ["id"]
+    replication_key = None
+    records_jsonpath = "$.results.[*].tables.[*]"
+    parent_stream_type = ReportsStream
+
+    schema = th.PropertiesList(
+        th.Property("datasetId", th.StringType),
+        th.Property("dataset_name", th.StringType),
+        th.Property("rows", th.CustomType({"type": ["array", "string"]})),
+    ).to_dict()
+
+    def prepare_request_payload(
+        self, context: Optional[dict], next_page_token: Optional[Any]
+    ) -> Optional[dict]:
+        """Prepare the query payload for the target table."""
         return {
-            "dataset_id": record["datasetId"],
+            "queries": [
+                {
+                    "query": f"EVALUATE Values('{context.get('table_name')}')",
+                }
+            ],
+            "serializerSettings": {"includeNulls": True},
         }
 
+    def get_records(self, context: Optional[dict]) -> Iterable[dict]:
+        """Fetch data only for the specified tables."""
+        for table in self.config["tables"]:  # Use specified tables
+            context["table_name"] = table
+            yield from super().get_records(context)
 
 class DataSetsStream(PowerBIStream):
-    """Define custom stream."""
+    """Stream for fetching datasets."""
 
     name = "datasets"
-    path = "/datasets"
+    path = "/groups/{workspace_id}/datasets" 
     primary_keys = ["id"]
     replication_key = None
     records_jsonpath = "$.value[*]"
+
     schema = th.PropertiesList(
         th.Property("id", th.StringType),
         th.Property("name", th.StringType),
         th.Property("webUrl", th.StringType),
         th.Property("configuredBy", th.StringType),
         th.Property("isRefreshable", th.BooleanType),
-        th.Property("isEffectiveIdentityRequired", th.BooleanType),
-        th.Property("isEffectiveIdentityRolesRequired", th.BooleanType),
-        th.Property("isOnPremGatewayRequired", th.BooleanType),
-        th.Property("targetStorageMode", th.StringType),
-        th.Property("createReportEmbedURL", th.StringType),
-        th.Property("qnaEmbedURL", th.StringType),
-        th.Property("upstreamDatasets", th.CustomType({"type": ["array", "string"]})),
-        th.Property("users", th.CustomType({"type": ["array", "string"]})),
     ).to_dict()
 
-    def get_child_context(self, record: dict, context: Optional[dict]) -> dict:
-        """Return a context dictionary for child streams."""
-        return {
-            "dataset_id": record["id"],
-            "dataset_name": record["name"],
-        }
+    def get_records(self, context: Optional[dict]) -> Iterable[dict]:
+        """Fetch and filter the target dataset."""
+        for record in super().get_records(context):
+            if record["id"] == self.config["dataset"]:
+                yield record
 
-class ReportDataSetsStream(DataSetsStream):
-    name = "report_datasets"
-    path = "/datasets/{dataset_id}"
-    parent_stream_type = ReportsStream
-    records_jsonpath = "$[*]"
-    
+
 class DataSetDataStream(PowerBIStream):
-    """Define custom stream."""
+    """Stream for fetching data from a dataset."""
 
     name = "dataset_data"
-    path = "/datasets/{dataset_id}/executeQueries"
+    path = "/groups/{workspace_id}/datasets/{dataset_id}/executeQueries" 
     rest_method = "POST"
     primary_keys = ["id"]
     replication_key = None
     records_jsonpath = "$.results.[*].tables.[*]"
-    parent_stream_type = DataSetsStream
-    current_table = None
 
     schema = th.PropertiesList(
         th.Property("datasetId", th.StringType),
         th.Property("dataset_name", th.StringType),
         th.Property("rows", th.CustomType({"type": ["array", "string"]})),
     ).to_dict()
-    
+
     def get_records(self, context: Optional[dict]) -> Iterable[dict]:
-        """
-        Override the get_records function so we could yield all of sellingProgram type report for each time period
-        """
+        """Fetch data only for the specified tables."""
         for table in self.get_tables(context):
-            self.current_table = table
-            yield from super().get_records(context)
-    
-    def get_dataset_tables(self, context: Optional[dict]) -> list:
-        url = self.url_base + f"/datasets/{context.get('dataset_id')}/tables"
-        headers = self.authenticator.auth_headers
-        resp =  requests.get(url, headers=headers)
-        tables = []
-        if resp.status_code == 400:
-            self.logger.warn(f"Failed to get tables for dataset {context.get('dataset_id')}. Response: {resp.text}")
-        if resp.status_code == 200 and "value" in resp.json():    
-            for table in resp.json()['value']:
-                tables.append(table['name'])    
-        return tables
-        
+            if table in self.config["tables"]:
+                self.current_table = table
+                yield from super().get_records(context)
+
+    def prepare_request_payload(
+        self, context: Optional[dict], next_page_token: Optional[Any]
+    ) -> Optional[dict]:
+        """Prepare the query payload for the target table."""
+        return {
+            "queries": [
+                {
+                    "query": f"EVALUATE Values('{self.current_table}')",
+                }
+            ],
+            "serializerSettings": {"includeNulls": True},
+        }
+
     def get_tables(self, context: Optional[dict]) -> list:
+        """Retrieve tables for the target dataset."""
         if self.config.get("tables"):
-            tables =  self.config.get("tables")
+            tables = self.config["tables"]
             if isinstance(tables, str):
                 tables = tables.split(",")
-            return tables   
-        else:
-            return self.get_dataset_tables(context)
-        
+            return tables
+        return []
 
-    def prepare_request_payload(
-        self, context: Optional[dict], next_page_token: Optional[Any]
-    ) -> Optional[dict]:
-        #Query limitation - https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/execute-queries#datasetexecutequeriesquery
-        #DAX Studio limitation for TopnSkip with Power BI https://github.com/DaxStudio/DaxStudio/issues/472
-        query = {
-            "queries": [
-                {
-                    # "query": f"EVALUATE TopnSkip({self._page_size},{self.offset},'{self.current_table}')"
-                    #Get maximum rows without paginating
-                    "query": f"EVALUATE Values('{self.current_table}')"
-                }
-            ],
-            "serializerSettings": {"includeNulls": True},
-        }
-        return query
 
-    def post_process(self, row: dict, context: Optional[dict]) -> dict:
-        row["datasetId"] = context.get("dataset_id")
-        row["dataset_name"] = context.get("dataset_name")
-        return row
-    
-    def get_next_page_token(
-        self, response: requests.Response, previous_token: Optional[Any]
-    ) -> Optional[Any]:
-        #Disable pagination, need to figure different pagination logic for different dataset types
-        return None
+class ReportDataSetsStream(DataSetsStream):
+    """Stream for datasets related to reports."""
 
-class ReportDataSetDataStream(PowerBIStream):
-    """Define custom stream."""
+    name = "report_datasets"
+    path = "/groups/{workspace_id}/datasets/{dataset_id}"
+    parent_stream_type = ReportsStream
+    records_jsonpath = "$[*]"
 
-    name = "report_dataset_data"
-    path = "/datasets/{dataset_id}/executeQueries"
-    rest_method = "POST"
-    primary_keys = ["id"]
-    replication_key = None
-    records_jsonpath = "$.results.[*].tables.[*]"
-    parent_stream_type = ReportDataSetsStream
-    
-    schema = th.PropertiesList(
-        th.Property("datasetId", th.StringType),
-        th.Property("dataset_name", th.StringType),
-        th.Property("rows", th.CustomType({"type": ["array", "string"]})),
-    ).to_dict()
-    
-    def prepare_request_payload(
-        self, context: Optional[dict], next_page_token: Optional[Any]
-    ) -> Optional[dict]:
-        query = {
-            "queries": [
-                {
-                    "query": f"EVALUATE TopnSkip({self._page_size},{self.offset},'{context.get('dataset_name')}')"
-                }
-            ],
-            "serializerSettings": {"includeNulls": True},
-        }
-        return query
-    
-    def post_process(self, row: dict, context: Optional[dict]) -> dict:
-        row["datasetId"] = context.get("dataset_id")
-        row["dataset_name"] = context.get("dataset_name")
-        return row
-
+    def get_records(self, context: Optional[dict]) -> Iterable[dict]:
+        """Fetch datasets only for the specified report."""
+        for record in super().get_records(context):
+            if record["id"] == self.config["dataset"]:
+                yield record
